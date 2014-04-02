@@ -13,8 +13,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 )
 
 type comm struct {
@@ -83,16 +81,10 @@ func (c *comm) Start(cmd *packer.RemoteCmd) (err error) {
 		return
 	}
 
-	// A channel to keep track of our done state
-	doneCh := make(chan struct{})
-	sessionLock := new(sync.Mutex)
-	timedOut := false
-
 	// Start a goroutine to wait for the session to end and set the
 	// exit boolean and status.
 	go func() {
 		defer session.Close()
-
 		err := session.Wait()
 		exitStatus := 0
 		if err != nil {
@@ -102,56 +94,8 @@ func (c *comm) Start(cmd *packer.RemoteCmd) (err error) {
 			}
 		}
 
-		sessionLock.Lock()
-		defer sessionLock.Unlock()
-
-		if timedOut {
-			// We timed out, so set the exit status to -1
-			exitStatus = -1
-		}
-
 		log.Printf("remote command exited with '%d': %s", exitStatus, cmd.Command)
 		cmd.SetExited(exitStatus)
-		close(doneCh)
-	}()
-
-	go func() {
-		failures := 0
-		for {
-			log.Printf("[DEBUG] Background SSH connection checker is testing")
-			dummy, err := c.config.Connection()
-			if err == nil {
-				failures = 0
-				dummy.Close()
-			}
-
-			select {
-			case <-doneCh:
-				return
-			default:
-			}
-
-			if err != nil {
-				log.Printf("background SSH connection checker failure: %s", err)
-				failures += 1
-			}
-
-			if failures < 5 {
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Acquire a lock in order to modify session state
-			sessionLock.Lock()
-			defer sessionLock.Unlock()
-
-			// Kill the connection and mark that we timed out.
-			log.Printf("Too many SSH connection failures. Killing it!")
-			c.conn.Close()
-			timedOut = true
-
-			return
-		}
 	}()
 
 	return
